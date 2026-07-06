@@ -44,6 +44,11 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-send.sh`             | Send one verified literal line or backend-supported `--key` through the target's recorded runtime backend; exits non-zero on confirmed swallowed Enter; bare `kind=secondmate` targets are marked as from-firstmate; slash commands and codex `$...` skill invocations get popup-settle before backend-specific submit verification; text sends pause `FM_SEND_SETTLE` seconds after success |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, dim-ghost-aware and border-aware composer detection, and verified submit retry |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint through the target's recorded runtime backend                            |
+| `fm-web.sh`              | Experimental localhost fleet dashboard (SSE, queue remove, agent peek/send, GitHub recent merges); see [web-companion.md](web-companion.md) |
+| `fm-backlog-rm.sh`       | Remove a queued backlog item by task id (refuses in-flight or done entries)                                         |
+| `fm-captain-action.sh`   | Append a web-or-UI captain action to `data/captain-actions.log` and enqueue a low-priority wake                       |
+| `fm-dashboard.sh`          | Optional colored TUI fleet dashboard (`--watch` for live refresh)                                                 |
+| `fm-fleet-dashboard.sh`  | Compact text fleet overview                                                                                         |
 | `fm-pr-check.sh`         | Record `pr=` and GitHub's `pr_head=` when available for a PR-ready task, then arm the watcher's merge poll          |
 | `fm-pr-merge.sh`         | Require a full GitHub PR URL, record `pr=` and available `pr_head=` via `fm-pr-check.sh`, parse it into `gh-axi pr merge <n> --repo <owner>/<repo>`, default to `--squash` unless a merge method is forwarded, and reject malformed URLs or repo overrides |
 | `fm-promote.sh`          | Promote a scout task in place so it becomes a protected ship task                                                   |

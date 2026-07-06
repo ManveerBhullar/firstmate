@@ -176,6 +176,13 @@ print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+subsection "data/captain-actions.log (recent non-chat captain actions)"
+ACTIONS_LOG="$DATA/captain-actions.log"
+if [ -f "$ACTIONS_LOG" ] && [ -s "$ACTIONS_LOG" ]; then
+  tail -n 15 "$ACTIONS_LOG"
+else
+  printf 'ABSENT\n'
+fi
 
 # --- 5. fleet-state digest ---------------------------------------------
 section "FLEET STATE"
