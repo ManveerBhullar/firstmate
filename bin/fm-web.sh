@@ -81,6 +81,55 @@ def watcher_status() -> dict:
     return {"alive": age <= GRACE, "age_secs": age, "grace": GRACE}
 
 
+def firstmate_session_status() -> dict:
+    try:
+        out = subprocess.check_output(
+            [str(BIN / "fm-lock.sh"), "status"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        ).strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return {
+            "state": "unknown",
+            "alive": False,
+            "detail": "session status unavailable",
+            "raw": "",
+        }
+    alive = "held by live" in out
+    if alive:
+        state = "live"
+    elif "free" in out:
+        state = "asleep"
+    else:
+        state = "asleep"
+    detail = out.replace("lock: ", "", 1).strip() if out else "unknown"
+    return {"state": state, "alive": alive, "detail": detail, "raw": out}
+
+
+def reconnect_message(firstmate: dict, watcher: dict) -> str:
+    if firstmate.get("alive") and watcher.get("alive"):
+        return "Dashboard refreshed. Firstmate session is live."
+    if firstmate.get("alive"):
+        return "Dashboard refreshed. Ping queued — re-arm watcher in firstmate if supervision is off."
+    return (
+        "Dashboard refreshed. Firstmate chat is asleep — open your agent session to wake it. "
+        "A ping is queued for when it returns."
+    )
+
+
+def reconnect_firstmate() -> dict:
+    log_captain_action("reconnect-ui", "dashboard reconnect")
+    firstmate = firstmate_session_status()
+    watcher = watcher_status()
+    return {
+        "ok": True,
+        "firstmate": firstmate,
+        "watcher": watcher,
+        "message": reconnect_message(firstmate, watcher),
+    }
+
+
 def parse_live_state(raw: str) -> dict:
     state = "unknown"
     detail = raw
@@ -589,6 +638,7 @@ def snapshot() -> dict:
     return {
         "home": str(HOME),
         "ts": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "firstmate": firstmate_session_status(),
         "watcher": watcher_status(),
         "summary": summary,
         "attention": attention,
@@ -653,6 +703,22 @@ PAGE = r"""<!DOCTYPE html>
     .supervision .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
     .supervision.off .dot { background: var(--bad); }
     .supervision.off { color: var(--bad); }
+    .supervision.warn .dot { background: var(--warn); }
+    .supervision.warn { color: var(--warn); }
+    .supervision-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px 16px;
+      margin-top: 12px;
+    }
+    .reconnect-note {
+      color: var(--muted);
+      font-size: 14px;
+      margin-top: 8px;
+      min-height: 1.2em;
+      line-height: 1.45;
+    }
 
     .alert {
       display: none;
@@ -841,9 +907,16 @@ PAGE = r"""<!DOCTYPE html>
       <h1>Firstmate</h1>
       <div class="meta" id="meta">Loading…</div>
       <div class="counts" id="counts"></div>
-      <div class="supervision" id="supervision">
-        <span class="dot"></span><span id="supervision-text">Checking</span>
+      <div class="supervision-row">
+        <div class="supervision" id="firstmate-session">
+          <span class="dot"></span><span id="firstmate-text">Firstmate: checking</span>
+        </div>
+        <div class="supervision" id="supervision">
+          <span class="dot"></span><span id="supervision-text">Watcher: checking</span>
+        </div>
+        <button class="btn" type="button" id="reconnect-btn">Reconnect</button>
       </div>
+      <div class="reconnect-note" id="reconnect-note"></div>
     </div>
 
     <div class="alert" id="watcher-alert"></div>
@@ -1124,18 +1197,34 @@ PAGE = r"""<!DOCTYPE html>
       document.getElementById('meta').textContent =
         data.ts + ' · ' + shortHome(data.home);
 
+      const fm = data.firstmate || {};
+      const fmEl = document.getElementById('firstmate-session');
+      const fmText = document.getElementById('firstmate-text');
+      if (fm.alive) {
+        fmEl.classList.remove('off', 'warn');
+        fmText.textContent = 'Firstmate: live';
+      } else if (fm.state === 'asleep') {
+        fmEl.classList.remove('off');
+        fmEl.classList.add('warn');
+        fmText.textContent = 'Firstmate: asleep';
+      } else {
+        fmEl.classList.add('off');
+        fmEl.classList.remove('warn');
+        fmText.textContent = 'Firstmate: unknown';
+      }
+
       const w = data.watcher;
       const sup = document.getElementById('supervision');
       const supText = document.getElementById('supervision-text');
       const alert = document.getElementById('watcher-alert');
       if (w.alive) {
         sup.classList.remove('off');
-        supText.textContent = 'Watcher on (' + w.age_secs + 's)';
+        supText.textContent = 'Watcher: on (' + w.age_secs + 's)';
         alert.classList.remove('show');
       } else {
         sup.classList.add('off');
         const age = w.age_secs == null ? 'no beacon' : w.age_secs + 's stale';
-        supText.textContent = 'Watcher off';
+        supText.textContent = 'Watcher: off';
         alert.textContent = 'Supervision is not running (' + age + '). Re-arm in your firstmate session.';
         alert.classList.add('show');
       }
@@ -1270,6 +1359,38 @@ PAGE = r"""<!DOCTYPE html>
         setTimeout(connectSSE, 3000);
       };
     }
+
+    async function reconnect() {
+      const btn = document.getElementById('reconnect-btn');
+      const note = document.getElementById('reconnect-note');
+      btn.disabled = true;
+      note.textContent = 'Reconnecting…';
+      try {
+        const res = await fetch('/api/reconnect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+          signal: fetchTimeout(12000),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        connectSSE();
+        tickBusy = false;
+        await tick(0);
+        note.textContent = data.message || 'Reconnected.';
+      } catch (e) {
+        note.textContent = (e.message || 'Reconnect failed')
+          + ' — if the dashboard server is down, run bin/fm-web.sh';
+        document.getElementById('meta').textContent = 'Reconnect failed';
+        document.getElementById('supervision').classList.add('off');
+        document.getElementById('supervision-text').textContent = 'Offline';
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    document.getElementById('reconnect-btn').addEventListener('click', reconnect);
+
     async function boot() {
       document.getElementById('meta').textContent = 'Connecting…';
       try {
@@ -1320,6 +1441,11 @@ class Handler(BaseHTTPRequestHandler):
             message = str(data.get("message", ""))
             result = send_to_crew(send_m.group(1), message)
             self._json_response(200 if result["ok"] else 400, result)
+            return
+
+        if path == "/api/reconnect":
+            result = reconnect_firstmate()
+            self._json_response(200, result)
             return
 
         if path != "/api/queue/remove":
@@ -1377,7 +1503,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(200 if result["ok"] else 400, result)
             return
         if path == "/api/health":
-            self._json_response(200, {"ok": True, "ts": time.strftime("%Y-%m-%d %H:%M:%S %Z")})
+            self._json_response(
+                200,
+                {
+                    "ok": True,
+                    "ts": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                    "firstmate": firstmate_session_status(),
+                    "watcher": watcher_status(),
+                },
+            )
             return
         if path == "/api/fleet":
             body = json.dumps(snapshot()).encode()

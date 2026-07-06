@@ -46,6 +46,7 @@ Web actions that firstmate should know about are appended to `data/captain-actio
 | GET | `/api/crew/<id>/peek?lines=50` | Agent pane capture |
 | POST | `/api/crew/<id>/send` | `{"message":"one line"}` steer |
 | POST | `/api/queue/remove` | `{"id":"<task-id>"}` remove queued item |
+| POST | `/api/reconnect` | Refresh dashboard link; queue a firstmate ping via captain-actions |
 
 All endpoints are localhost-only. Task ids must match `state/<id>.meta`.
 
@@ -83,6 +84,16 @@ bin/fm-web.sh
 ```
 
 To contribute upstream later, follow [CONTRIBUTING.md](../CONTRIBUTING.md) and `no-mistakes init --fork-url` against your fork.
+
+## Reconnect button
+
+The header **Reconnect** button:
+
+1. Refreshes fleet data and the SSE stream (fixes a stale or offline dashboard when `bin/fm-web.sh` is still running).
+2. Logs a captain action and enqueues a low-priority wake so firstmate can reconcile — **only if** a live firstmate session and watcher are already running.
+
+It **cannot** start a sleeping firstmate LLM session from the browser.
+When the session lock is free or stale, open your firstmate chat to wake the agent; the dashboard will show **Firstmate: asleep**.
 
 ## Limits
 
