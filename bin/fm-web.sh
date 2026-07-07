@@ -55,6 +55,7 @@ PORT = int(sys.argv[1])
 GRACE = int(os.environ.get("FM_GUARD_GRACE", "300"))
 
 PR_RE = re.compile(r"https://github\.com/[^\s)]+/pull/\d+")
+PR_PATH_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 REPO_FROM_PR_RE = re.compile(r"github\.com/[^/]+/([^/]+)/pull/")
 DONE_OUTCOME_RE = re.compile(r"\((merged|reported|open)(?:\s+([^)]+))?\)", re.I)
 ID_RE = re.compile(r"\*\*([a-z0-9][-a-z0-9]*)\*\*|^([a-z0-9][-a-z0-9]*) -")
@@ -459,6 +460,73 @@ def fleet_row(meta: Path, titles: dict[str, str]) -> dict:
     }
 
 
+_PR_STATE_CACHE: dict[str, dict] = {}
+PR_STATE_CACHE_TTL = int(os.environ.get("FM_WEB_PR_CACHE_SECS", "120"))
+
+
+def github_pr_state(pr_url: str) -> dict | None:
+    m = PR_PATH_RE.search(pr_url or "")
+    if not m:
+        return None
+    owner, repo, number = m.group(1), m.group(2), m.group(3)
+    now = time.time()
+    cached = _PR_STATE_CACHE.get(pr_url)
+    if cached and now - cached.get("ts", 0) < PR_STATE_CACHE_TTL:
+        return cached
+    try:
+        out = subprocess.check_output(
+            [
+                "gh",
+                "pr",
+                "view",
+                number,
+                "--repo",
+                f"{owner}/{repo}",
+                "--json",
+                "state,mergedAt",
+            ],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=12,
+        )
+        data = json.loads(out or "{}")
+        result = {
+            "state": (data.get("state") or "").upper(),
+            "merged_at": data.get("mergedAt") or "",
+            "ts": now,
+        }
+        _PR_STATE_CACHE[pr_url] = result
+        return result
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        return None
+
+
+def apply_github_pr_status(rows: list[dict]) -> None:
+    targets = [r for r in rows if r.get("pr") and r.get("bucket") == "pr-ready"]
+    if not targets:
+        return
+
+    def enrich(row: dict) -> None:
+        gh = github_pr_state(row["pr"])
+        if not gh:
+            return
+        gh_state = gh.get("state", "")
+        if gh_state == "MERGED":
+            row["bucket"] = "merged"
+            row["state"] = "merged"
+            row["pr_state"] = "MERGED"
+            row["merged_at"] = gh.get("merged_at", "")
+            row["detail"] = "Merged on GitHub — awaiting teardown"
+        elif gh_state == "CLOSED":
+            row["bucket"] = "closed"
+            row["state"] = "closed"
+            row["pr_state"] = "CLOSED"
+            row["detail"] = "PR closed without merge"
+
+    with ThreadPoolExecutor(max_workers=min(len(targets), 6)) as pool:
+        list(pool.map(lambda r: enrich(r), targets))
+
+
 def fleet_rows(titles: dict[str, str]) -> list[dict]:
     metas = sorted(STATE.glob("*.meta"))
     rows: list[dict] = []
@@ -468,7 +536,18 @@ def fleet_rows(titles: dict[str, str]) -> list[dict]:
         futures = {pool.submit(fleet_row, meta, titles): meta for meta in metas}
         for fut in as_completed(futures):
             rows.append(fut.result())
-    order = {"needs-decision": 0, "blocked": 1, "failed": 2, "pr-ready": 3, "working": 4, "unknown": 5, "done": 6}
+    apply_github_pr_status(rows)
+    order = {
+        "needs-decision": 0,
+        "blocked": 1,
+        "failed": 2,
+        "pr-ready": 3,
+        "working": 4,
+        "merged": 5,
+        "closed": 6,
+        "unknown": 7,
+        "done": 8,
+    }
     rows.sort(key=lambda r: (order.get(r["bucket"], 9), r["id"]))
     return rows
 
@@ -628,6 +707,7 @@ def snapshot() -> dict:
         "total": len(fleet),
         "working": sum(1 for r in fleet if r["bucket"] == "working"),
         "pr_ready": sum(1 for r in fleet if r["bucket"] == "pr-ready"),
+        "merged_pending": sum(1 for r in fleet if r["bucket"] == "merged"),
         "needs_you": sum(1 for r in fleet if r["bucket"] in ("needs-decision", "blocked", "failed")),
         "queued": len(backlog["queued"]),
     }
@@ -802,6 +882,8 @@ PAGE = r"""<!DOCTYPE html>
     .status .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
     .status.s-working .dot { background: var(--work); }
     .status.s-pr-ready .dot { background: var(--ok); }
+    .status.s-merged .dot { background: var(--ok); }
+    table.data tbody tr.flag-merged { background: #0a140a; }
     .status.s-needs-decision .dot, .status.s-blocked .dot, .status.s-failed .dot { background: var(--warn); }
     .status.s-done .dot { background: var(--ok); }
     .status.s-unknown .dot { background: var(--muted); }
@@ -1043,6 +1125,7 @@ PAGE = r"""<!DOCTYPE html>
     }
     function taskRow(r) {
       const flag = r.bucket === 'pr-ready' ? 'flag-pr'
+        : r.bucket === 'merged' ? 'flag-merged'
         : (r.bucket === 'needs-decision' || r.bucket === 'blocked' || r.bucket === 'failed') ? 'flag' : '';
       const title = r.title || '';
       const note = trimNote(r.detail) || '—';
@@ -1063,6 +1146,8 @@ PAGE = r"""<!DOCTYPE html>
     }
     function statusLabel(bucket, state) {
       if (bucket === 'pr-ready') return 'PR ready';
+      if (bucket === 'merged') return 'Merged';
+      if (bucket === 'closed') return 'PR closed';
       if (bucket === 'needs-decision') return 'Decision';
       if (bucket === 'blocked') return 'Blocked';
       if (bucket === 'failed') return 'Failed';
@@ -1232,6 +1317,7 @@ PAGE = r"""<!DOCTYPE html>
       const s = data.summary;
       let countsHtml = '<span><b>' + s.working + '</b> working</span>';
       if (s.pr_ready) countsHtml += '<span class="pr"><b>' + s.pr_ready + '</b> PR ready</span>';
+      if (s.merged_pending) countsHtml += '<span><b>' + s.merged_pending + '</b> merged (teardown)</span>';
       if (s.needs_you) countsHtml += '<span class="hi"><b>' + s.needs_you + '</b> need you</span>';
       countsHtml += '<span><b>' + s.total + '</b> in flight</span>';
       countsHtml += '<span><b>' + s.queued + '</b> queued</span>';

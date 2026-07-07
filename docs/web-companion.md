@@ -20,7 +20,7 @@ Requires `python3` on PATH and `gh` authenticated for the **Recent merges** sect
 
 | Section | Source |
 | --- | --- |
-| Action required | In-flight tasks in `needs-decision`, `blocked`, `failed`, or PR-ready state |
+| Action required | In-flight tasks in `needs-decision`, `blocked`, `failed`, or PR-ready state (open PRs only — merged PRs drop out) |
 | In flight | `state/*.meta` + live `fm-crew-state.sh` per task |
 | Queued | `data/backlog.md` queued items |
 | Recent merges | GitHub merged PRs (last few days), enriched with crew task id from `fm/<task>` branches |
@@ -94,6 +94,12 @@ The header **Reconnect** button:
 
 It **cannot** start a sleeping firstmate LLM session from the browser.
 When the session lock is free or stale, open your firstmate chat to wake the agent; the dashboard will show **Firstmate: asleep**.
+
+## PR status
+
+Tasks that reported `done: PR <url>` normally show as **PR ready**.
+The dashboard also checks GitHub: if the PR is already **merged**, the row moves to **Merged** (awaiting teardown) and leaves Action required.
+The crew worktree stays until firstmate runs teardown — that is expected.
 
 ## Limits
 
